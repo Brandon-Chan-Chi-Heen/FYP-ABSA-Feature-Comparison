@@ -3,6 +3,9 @@ import nltk
 import re
 import string
 import pandas
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 # balancing data
 from imblearn.over_sampling import SMOTE
@@ -10,18 +13,22 @@ from pyloras import LORAS
 
 # data splitting and result reporting
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import f1_score
-from sklearn.metrics import accuracy_score, f1_score, classification_report
+from sklearn.metrics import classification_report, confusion_matrix
 
 # feature extraction
 from sklearn.decomposition import PCA
-from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 
 from sklearn.model_selection import GridSearchCV
 from sklearn.ensemble import AdaBoostClassifier
+from sklearn.naive_bayes import MultinomialNB
+from gensim.models import Word2Vec
+
 from joblib import dump, load
 import os
 
+st.set_page_config(layout="wide")
+st.set_option('deprecation.showPyplotGlobalUse', False)
 
 data = pandas.read_csv('Tweets-transformed.csv')
 
@@ -151,29 +158,66 @@ data['final_text'] = data['text'].apply(preprocess)
 # split the test data
 x_train, x_test, y_train, y_test = train_test_split(data['final_text'], data['airline_sentiment'],train_size = 0.7,test_size = 0.3, random_state=0)
 
+def train_estimator(x_train_data, y_train_data, name):
+    tuning_params = [
+        {
+            'n_estimators' : [100], 
+            'random_state': [0]
+        }
+    ]
+
+    estimator = None
+    if os.path.exists(name + '.joblib'):
+        estimator = load(name + '.joblib')
+    else:
+        adaboost = AdaBoostClassifier()
+        grid_search = GridSearchCV(adaboost, tuning_params, scoring='f1_macro', n_jobs=-1)
+        grid_search.fit(x_train_data, y_train_data)
+        estimator = grid_search.best_estimator_
+        dump(grid_search.best_estimator_, name + '.joblib')
+    
+    return estimator
+
+def vectorizeWord2Vec(sentence, w2v_model):
+    words = sentence.split()
+    words_vecs = [w2v_model.wv[word] for word in words if word in w2v_model.wv]
+    if len(words_vecs) == 0:
+        return np.zeros(100)
+    words_vecs = np.array(words_vecs)
+    return words_vecs.mean(axis=0)
+
+
+def trainWord2Vec(x_train_data, x_test_data, y_train_data, name='word2vec', balanced=False):
+    w2v_model = None
+    if os.path.exists('word2vec_extractor.joblib'):
+        w2v_model = load('word2vec_extractor.joblib')
+    else:
+        sentences = [sentence.split() for sentence in x_train_data]
+        w2v_model = Word2Vec(sentences, window=5, min_count=5, workers=4)
+        dump(w2v_model, 'word2vec_extractor.joblib')
+    
+    if balanced:
+        name += '_balanced'
+    else:
+        name += '_imbalanced'
+
+    fitted_x_train = np.array([vectorizeWord2Vec(sentence, w2v_model) for sentence in x_train_data])
+    fitted_x_test = np.array([vectorizeWord2Vec(sentence, w2v_model) for sentence in x_test_data])
+
+    if balanced:
+        smote_nc = SMOTE(sampling_strategy="auto", random_state=0)
+        # smote_nc = LORAS(random_state=0)
+        # st.write("Before balancing: ", fitted_x_train.shape, y_train_data.shape)
+        fitted_x_train, y_train_data = smote_nc.fit_resample(fitted_x_train, y_train_data)
+        # st.write("After balancing: ", fitted_x_train.shape, y_train_data.shape)
+
+    estimator = train_estimator(fitted_x_train, y_train_data, name)
+
+    return fitted_x_test, w2v_model, estimator
+
 # train feature extractor and model
 # @returns tuple[fitted_x_test, featureExtractor, estimator]
 def train(featureExtractor, x_train_data, x_test_data, y_train_data, name, balanced=False):
-    def train_estimator(x_train_data, y_train_data, name):
-        tuning_params = [
-            {
-                'n_estimators' : [100], 
-                'random_state': [0]
-            }
-        ]
-
-        estimator = None
-        if os.path.exists(name + '.joblib'):
-            estimator = load(name + '.joblib')
-        else:
-            adaboost = AdaBoostClassifier()
-            grid_search = GridSearchCV(adaboost, tuning_params, scoring='f1_macro', n_jobs=-1)
-            grid_search.fit(x_train_data, y_train_data)
-            estimator = grid_search.best_estimator_
-            dump(grid_search.best_estimator_, name + '.joblib')
-        
-        return estimator
-
     if os.path.exists(name + '_extractor.joblib'):
         featureExtractor = load(name + '_extractor.joblib')
     else:
@@ -191,57 +235,133 @@ def train(featureExtractor, x_train_data, x_test_data, y_train_data, name, balan
     if balanced:
         smote_nc = SMOTE(sampling_strategy="auto", random_state=0)
         # smote_nc = LORAS(random_state=0)
-        st.write("Before balancing: ", fitted_x_train.shape, y_train_data.shape)
+        # st.write("Before balancing: ", fitted_x_train.shape, y_train_data.shape)
         fitted_x_train, y_train_data = smote_nc.fit_resample(fitted_x_train, y_train_data)
-        st.write("After balancing: ", fitted_x_train.shape, y_train_data.shape)
+        # st.write("After balancing: ", fitted_x_train.shape, y_train_data.shape)
     
     estimator = train_estimator(fitted_x_train, y_train_data, name)
 
     return fitted_x_test, featureExtractor, estimator
 
 # get classification report
-def getReport(fitted_x, y_test_data, estimator):
+def getYPred(fitted_x, estimator):
+    return estimator.predict(fitted_x)
     y_pred = estimator.predict(fitted_x)
     return classification_report(y_test_data, y_pred, output_dict=True) 
 
 inputTab, classificationTab = st.tabs(['User Input', "Classification Results"])
 
+polarity_labels = ['negative', 'positive', 'neutral']
+
 with classificationTab:
     
     st.text("Imbalanced Data")
-    imbalancedCol1, imbalancedCol2 = st.columns(2)
+    imbalancedCol1, imbalancedCol2, imbalancedCol3 = st.columns(3)
 
     with imbalancedCol1:
-        # bigram/trigram
-        x_test_ngram, ngram_extractor, ngram_estimator = train(CountVectorizer(ngram_range=(2,3)), x_train, x_test, y_train, 'ngram', balanced=False)
-        ngram_report = getReport(x_test_ngram, y_test, ngram_estimator)
-        st.write("n-gram report")
-        st.dataframe(pandas.DataFrame(ngram_report).transpose())
+        # tf-idf
+        x_test_tfidf, tfidf_extractor, tfidf_estimator = train(TfidfVectorizer(), x_train, x_test, y_train, 'tfidf', balanced=False)
+        y_pred = tfidf_estimator.predict(x_test_tfidf)
+        tfidf_report = classification_report(y_test, y_pred, output_dict=True)
+        st.write("tf-idf report")
+        st.dataframe(pandas.DataFrame(tfidf_report).transpose())
+
+        cm = confusion_matrix(y_test, y_pred)
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False, 
+                    xticklabels=polarity_labels, yticklabels=polarity_labels)
+        plt.xlabel("Predicted")
+        plt.ylabel("True")
+        st.pyplot()
 
     with imbalancedCol2:
-        # Bag of words
-        x_test_bagOfWords, bagOfWords_extractor, bagOfWords_estimator = train(CountVectorizer(), x_train, x_test, y_train, 'bagOfWords', balanced=False)
-        bagOfWords_report = getReport(x_test_bagOfWords, y_test, bagOfWords_estimator)
-        st.write("Bag Of Words")
-        st.dataframe(pandas.DataFrame(bagOfWords_report).transpose())
+        # bigram/trigram
+        x_test_ngram, ngram_extractor, ngram_estimator = train(CountVectorizer(ngram_range=(2,3)), x_train, x_test, y_train, 'ngram', balanced=False)
+        y_pred = ngram_estimator.predict(x_test_ngram)
+        ngram_report = classification_report(y_test, y_pred, output_dict=True)
+        st.write("n-gram report")
+        st.dataframe(pandas.DataFrame(ngram_report).transpose())
+        cm = confusion_matrix(y_test, y_pred)
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False, 
+                    xticklabels=polarity_labels, yticklabels=polarity_labels)
+        plt.xlabel("Predicted")
+        plt.ylabel("True")
+        st.pyplot()
+
+    with imbalancedCol3:
+        # word2vec
+        # x_test_bagOfWords, bagOfWords_extractor, bagOfWords_estimator = train(CountVectorizer(), x_train, x_test, y_train, 'bagOfWords', balanced=False)
+        # y_pred = bagOfWords_estimator.predict(x_test_bagOfWords)
+        # bagOfWords_report = classification_report(y_test, y_pred, output_dict=True)
+        # st.write("Bag Of Words")
+        # st.dataframe(pandas.DataFrame(bagOfWords_report).transpose())
+        x_test_word2vec, w2v_model, word2vec_estimator = trainWord2Vec(x_train, x_test, y_train, balanced=False)
+        y_pred = word2vec_estimator.predict(x_test_word2vec)
+        word2vec_report = classification_report(y_test, y_pred, output_dict=True)
+        st.write("Word2Vec")
+        st.dataframe(pandas.DataFrame(word2vec_report).transpose())
+        cm = confusion_matrix(y_test, y_pred)
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False, 
+                    xticklabels=polarity_labels, yticklabels=polarity_labels)
+        plt.xlabel("Predicted")
+        plt.ylabel("True")
+        st.pyplot()
 
     
     st.text("Balanced Data")
-    balancedCol1, balancedCol2 = st.columns(2)
+    balancedCol1, balancedCol2, balancedCol3 = st.columns(3)
 
     with balancedCol1:
-        # bigram/trigram
-        x_test_ngram_balanced, ngram_extractor_balanced, ngram_estimator_balanced = train(CountVectorizer(ngram_range=(2,3)), x_train, x_test, y_train, 'ngram', balanced=True)
-        ngram_report_balanced = getReport(x_test_ngram_balanced, y_test, ngram_estimator_balanced)
-        st.write("n-gram report")
-        st.dataframe(pandas.DataFrame(ngram_report_balanced).transpose())
+        # tf-idf
+        x_test_tfidf_balanced, tfidf_extractor_balanced, tfidf_estimator_balanced = train(TfidfVectorizer(), x_train, x_test, y_train, 'tfidf', balanced=True)
+        y_pred = tfidf_estimator_balanced.predict(x_test_tfidf_balanced)
+        tfidf_report_balanced = classification_report(y_test, y_pred, output_dict=True)
+        st.write("tf-idf report")
+        st.dataframe(pandas.DataFrame(tfidf_report_balanced).transpose())
+        cm = confusion_matrix(y_test, y_pred)
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False, 
+                    xticklabels=polarity_labels, yticklabels=polarity_labels)
+        plt.xlabel("Predicted")
+        plt.ylabel("True")
+        st.pyplot()
 
     with balancedCol2:
+        # bigram/trigram
+        x_test_ngram_balanced, ngram_extractor_balanced, ngram_estimator_balanced = train(CountVectorizer(ngram_range=(2,3)), x_train, x_test, y_train, 'ngram', balanced=True)
+        y_pred = ngram_estimator_balanced.predict(x_test_ngram_balanced)
+        ngram_report_balanced = classification_report(y_test, y_pred, output_dict=True)
+        st.write("n-gram report")
+        st.dataframe(pandas.DataFrame(ngram_report_balanced).transpose())
+        cm = confusion_matrix(y_test, y_pred)
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False, 
+                    xticklabels=polarity_labels, yticklabels=polarity_labels)
+        plt.xlabel("Predicted")
+        plt.ylabel("True")
+        st.pyplot()
+
+    with balancedCol3:
         # Bag of words
-        x_test_bagOfWords_balanced, bagOfWords_extractor_balanced, bagOfWords_estimator_balanced = train(CountVectorizer(), x_train, x_test, y_train, 'bagOfWords', balanced=True)
-        bagOfWords_report_balanced = getReport(x_test_bagOfWords_balanced, y_test, bagOfWords_estimator_balanced)
-        st.write("Bag Of Words")
-        st.dataframe(pandas.DataFrame(bagOfWords_report_balanced).transpose())
+        # x_test_bagOfWords_balanced, bagOfWords_extractor_balanced, bagOfWords_estimator_balanced = train(CountVectorizer(), x_train, x_test, y_train, 'bagOfWords', balanced=True)
+        # y_pred = bagOfWords_estimator_balanced.predict(x_test_bagOfWords_balanced)
+        # bagOfWords_report_balanced = classification_report(y_test, y_pred, output_dict=True)
+        # st.write("Bag Of Words")
+        # st.dataframe(pandas.DataFrame(bagOfWords_report_balanced).transpose())
+        x_test_word2vec_balanced, w2v_model, word2vec_estimator_balanced = trainWord2Vec(x_train, x_test, y_train, balanced=True)
+        y_pred = word2vec_estimator_balanced.predict(x_test_word2vec_balanced)
+        word2vec_report_balanced = classification_report(y_test, y_pred, output_dict=True)
+        st.write("Word2Vec")
+        st.dataframe(pandas.DataFrame(word2vec_report_balanced).transpose())
+        cm = confusion_matrix(y_test, y_pred)
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False, 
+                    xticklabels=polarity_labels, yticklabels=polarity_labels)
+        plt.xlabel("Predicted")
+        plt.ylabel("True")
+        st.pyplot()
 
 # imbalanced prediction
 
@@ -254,10 +374,30 @@ def getPrediction(text, extractor, estimator):
     prediction = estimator.predict(extractedText)
     return prediction
 
+def getPredictionW2v(text, estimator, w2v_model):
+    if not text:
+        return ""
+    
+    cleanedText = preprocess(text)
+    extractedText = [vectorizeWord2Vec(cleanedText, w2v_model)]
+    prediction = estimator.predict(extractedText)
+    return prediction
+
 userInput = inputTab.text_input("Enter your airline review here")
 
+inputTab.text("Imbalanced Models")
 inputTab.text("CountVec Prediction: " + getPrediction(userInput, ngram_extractor, ngram_estimator))
-inputTab.text("BagOfWords Prediction: " + getPrediction(userInput, bagOfWords_extractor, bagOfWords_estimator))
+inputTab.text("TfIdf Prediction: " + getPrediction(userInput, tfidf_extractor, tfidf_estimator))
+inputTab.text("Word2Vec Prediction: " + getPredictionW2v(userInput, word2vec_estimator, w2v_model))
+
+inputTab.text("Balanced Models")
+inputTab.text("CountVec Prediction: " + getPrediction(userInput, ngram_extractor_balanced, ngram_estimator_balanced))
+inputTab.text("TfIdf Prediction: " + getPrediction(userInput, tfidf_extractor_balanced, tfidf_estimator_balanced))
+inputTab.text("Word2Vec Prediction: " + getPredictionW2v(userInput, word2vec_estimator_balanced, w2v_model))
+
+
+# bag of words prediction
+# inputTab.text("BagOfWords Prediction: " + getPrediction(userInput, bagOfWords_extractor, bagOfWords_estimator))
 
 # balanced prediction
 # inputTab.text("Some other algorithm Prediction: " + getPrediction(userInput, bagOfWords_extractor, bagOfWords_estimator))
