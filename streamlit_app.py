@@ -1,29 +1,30 @@
-import streamlit as st
+import streamlit as st # UI LIbrary
 import nltk
 import re
 import string
 import pandas
 import numpy as np
-import seaborn as sns
+
+# Visualization libraries
+import seaborn as sns 
 import matplotlib.pyplot as plt
 
-# balancing data
+# oversampler
 from imblearn.over_sampling import SMOTE
-from pyloras import LORAS
 
 # data splitting and result reporting
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix
 
 # feature extraction
-from sklearn.decomposition import PCA
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
-
-from sklearn.model_selection import GridSearchCV
-from sklearn.ensemble import AdaBoostClassifier
-from sklearn.naive_bayes import MultinomialNB
 from gensim.models import Word2Vec
 
+# ML Model
+from sklearn.model_selection import GridSearchCV
+from sklearn.ensemble import AdaBoostClassifier
+
+# Saving and loading models
 from joblib import dump, load
 import os
 
@@ -234,7 +235,6 @@ def train(featureExtractor, x_train_data, x_test_data, y_train_data, name, balan
 
     if balanced:
         smote_nc = SMOTE(sampling_strategy="auto", random_state=0)
-        # smote_nc = LORAS(random_state=0)
         # st.write("Before balancing: ", fitted_x_train.shape, y_train_data.shape)
         fitted_x_train, y_train_data = smote_nc.fit_resample(fitted_x_train, y_train_data)
         # st.write("After balancing: ", fitted_x_train.shape, y_train_data.shape)
@@ -290,16 +290,10 @@ with classificationTab:
         st.pyplot()
 
     with imbalancedCol3:
-        # word2vec
-        # x_test_bagOfWords, bagOfWords_extractor, bagOfWords_estimator = train(CountVectorizer(), x_train, x_test, y_train, 'bagOfWords', balanced=False)
-        # y_pred = bagOfWords_estimator.predict(x_test_bagOfWords)
-        # bagOfWords_report = classification_report(y_test, y_pred, output_dict=True)
-        # st.write("Bag Of Words")
-        # st.dataframe(pandas.DataFrame(bagOfWords_report).transpose())
         x_test_word2vec, w2v_model, word2vec_estimator = trainWord2Vec(x_train, x_test, y_train, balanced=False)
         y_pred = word2vec_estimator.predict(x_test_word2vec)
         word2vec_report = classification_report(y_test, y_pred, output_dict=True)
-        st.write("Word2Vec")
+        st.write("Word embedding(Word2Vec)")
         st.dataframe(pandas.DataFrame(word2vec_report).transpose())
         cm = confusion_matrix(y_test, y_pred)
         plt.figure(figsize=(8, 6))
@@ -310,7 +304,7 @@ with classificationTab:
         st.pyplot()
 
     
-    st.text("Balanced Data")
+    st.text("After oversampling with SMOTE")
     balancedCol1, balancedCol2, balancedCol3 = st.columns(3)
 
     with balancedCol1:
@@ -353,7 +347,7 @@ with classificationTab:
         x_test_word2vec_balanced, w2v_model, word2vec_estimator_balanced = trainWord2Vec(x_train, x_test, y_train, balanced=True)
         y_pred = word2vec_estimator_balanced.predict(x_test_word2vec_balanced)
         word2vec_report_balanced = classification_report(y_test, y_pred, output_dict=True)
-        st.write("Word2Vec")
+        st.write("Word embedding(Word2Vec)")
         st.dataframe(pandas.DataFrame(word2vec_report_balanced).transpose())
         cm = confusion_matrix(y_test, y_pred)
         plt.figure(figsize=(8, 6))
